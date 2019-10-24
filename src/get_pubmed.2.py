@@ -6,13 +6,17 @@ import argparse
 import sys
 import math
 from multiprocessing import Process
+from Bio import Entrez
+import json
+import pprint
+import time
+import sys
+pp = pprint.PrettyPrinter(indent=4)
 
 pubmedID = re.compile("PMID:\s(\d+).")
-#HTMLabstract = re.compile('<h3>Abstract</h3><div class=""><p>([\w\d\s.,;<="-:>]+)</p>')
-#HTMLabstract = re.compile('<h3>Abstract</h3><div class="">(.+)</div><div class="keywords">')
 HTMLabstract = re.compile('<h3>Abstract</h3><div class="">(.+)</p><p class="copyright">Copyright')
-#HTMLtitle = re.compile('</div><h1>([\w\d\s.,;<="-:>]+)</h1>')
 HTMLtitle = re.compile('</div><h1>(.+)</h1>')
+MyEmail = "jw3514@cumc.columbia.edu"
 
 def parseArg():
 	parser = argparse.ArgumentParser(description='Process some integers.')
@@ -21,6 +25,8 @@ def parseArg():
 	parser.add_argument('-o', '--OutFil', required=True, type=str,
 	                    help='Output Name')
 	parser.add_argument('-t', '--threads', default=1, type=int,
+	                    help='Threads')
+	parser.add_argument('-b', '--batch', default=100, type=int,
 	                    help='Threads')
 
 	args = parser.parse_args()
@@ -32,6 +38,7 @@ class GetPubmed(object):
 		self.InpFil = args.InpFil
 		self.OutName = args.OutFil
 		self.threads = args.threads
+		self.batch_size = args.batch
 		self.pubmedIDs = []
 		
 	def run(self):
@@ -42,41 +49,56 @@ class GetPubmed(object):
 			pubmed_id = pubmedID.search(l)
 			if pubmed_id != None:
 				self.pubmedIDs.append(pubmed_id.group(1))
-				#print(pubmed_id.group(1))
-				#Counter += 1
-				#Title, Abstract = self.GrabAbstract(pubmed_id.group(1))
-				#if Title != None:
-				#	SaveFil.write("<PubMedID>%s<Title>%s\n"%(pubmed_id.group(1), Title))
-				#	SaveFil.write("<Abstract>%s\n"%(Abstract))
-
-			#break
-		#print(Counter)
 		if self.threads == 1:
 			self.process(self.pubmedIDs, "%s.Abs.txt"%(self.OutName))
 		else:
 			procs = []
 			step = math.ceil(len(self.pubmedIDs)/self.threads)
-			#print(len(self.pubmedIDs), step)
 			for i in range(self.threads):
 				fname = "%s.%d.Abs.txt"%(self.OutName, i+1)
 				if i < self.threads-1 :
-					#print(i, i*step, (i+1)*step)
 					List = self.pubmedIDs[i*step:(i+1)*step]
 				else:
-					#print(i*step, len(self.pubmedIDs))
 					List = self.pubmedIDs[i*step:]
 				p = Process(target=self.process, args=(List, fname))
 				p.start()
 				procs.append(p)
 			[p.join() for p in procs]
-			print("Done!")
+		stderr.write("Done!")
 
 	def process(self, pubmedIDList, outputFilename):
 		OutFil = open(outputFilename, 'wt')
-		for pubmed_id in pubmedIDList:
-			Title, Abstract = self.GrabAbstract(pubmed_id)
-			if Title != None:
-				OutFil.write("%s:%s:%s\n"%(pubmed_id, Title, Abstract))
+		FLAG_STOP = False
+		while 1:
+			try:
+				if len(pubmedIDList) > self.batch_size:
+					IDs = pubmedIDList[0:self.batch_size]
+				else:
+					IDs = pubmedIDList
+					FLAG_STOP = True
+				papers = self.fetch_details(IDs)
+				for paper in papers["PubmedArticle"]:
+					try:
+						Title = paper["MedlineCitation"]["Article"]["ArticleTitle"]
+						AbstractParts = paper["MedlineCitation"]["Article"]["Abstract"]["AbstractText"]
+						AbstractString = " ".join(AbstractParts)
+						soup = BeautifulSoup(AbstractString, "lxml")
+						AbstractString = soup.getText()
+						#print(AbstractString)
+						OutString = "%s|%s|%s\n"%(ID, Title, AbstractString)
+						OutFil.write("%s|%s|%s\n"%(ID, Title, AbstractString))
+						stdout.write(OutString)
+					except:
+						stderr.write("Cant find title or abstract: %s"%paper["MedlineCitation"]["PMID"])
+				if FLAG_STOP:
+					break
+				pubmedIDList = pubmedIDList[self.batch_size:]
+			except urllib.error.HTTPError:
+				secs = 5
+				stderr.write("waiting %d secs"%secs)
+				time.sleep(secs)
+			except:
+				print("Unexpected error:", sys.exc_info()[0])
 
 	def GrabAbstract(self, pubmed_id):
 		url = "https://www.ncbi.nlm.nih.gov/pubmed/%s"%(pubmed_id)
@@ -114,6 +136,18 @@ class GetPubmed(object):
 			print("Cant find Abstract or Title for %s"%pubmed_id)
 			return None, None 
 
+	def search(self, query):
+		Entrez.email = "jw3514@cumc.columbia.edu"
+		handle = Entrez.esearch(db='pubmed', sort='relevance', retmax='20',retmode='xml', term=query)
+		results = Entrez.read(handle)
+		return results
+	
+	def fetch_details(self, IDs):
+		Entrez.email = MyEmail 
+		IDs = ".".join(IDs)
+		handle = Entrez.efetch(db='pubmed',retmode='xml',id=IDs)
+		results = Entrez.read(handle)
+		return results
 
 def main():
 	args = parseArg()
